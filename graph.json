@@ -9,20 +9,20 @@
       "complexity": 1,
       "imports": [],
       "exports": [],
-      "churn": 0,
-      "hotness": 0.0132
+      "churn": 0.2,
+      "hotness": 0.09320000000000002
     },
     {
-      "id": "repomap_html",
-      "path": "repomap.html",
-      "name": "repomap.html",
-      "language": "HTML",
-      "loc": 422,
-      "complexity": 5665,
+      "id": "test-churn_js",
+      "path": "test-churn.js",
+      "name": "test-churn.js",
+      "language": "JavaScript",
+      "loc": 6,
+      "complexity": 1,
       "imports": [],
       "exports": [],
-      "churn": 0,
-      "hotness": 1
+      "churn": 1,
+      "hotness": 0.4078
     },
     {
       "id": "package_json",
@@ -33,8 +33,8 @@
       "complexity": 1,
       "imports": [],
       "exports": [],
-      "churn": 0,
-      "hotness": 0.024599999999999997
+      "churn": 0.2,
+      "hotness": 0.10460000000000001
     },
     {
       "id": "package-lock_json",
@@ -45,8 +45,20 @@
       "complexity": 1,
       "imports": [],
       "exports": [],
-      "churn": 0,
+      "churn": 0.2,
       "hotness": 1
+    },
+    {
+      "id": "graph_json",
+      "path": "graph.json",
+      "name": "graph.json",
+      "language": "JSON",
+      "loc": 192,
+      "complexity": 1,
+      "imports": [],
+      "exports": [],
+      "churn": 0.2,
+      "hotness": 0.1436
     },
     {
       "id": "README_md",
@@ -57,15 +69,15 @@
       "complexity": 11,
       "imports": [],
       "exports": [],
-      "churn": 0,
-      "hotness": 0.12840000000000001
+      "churn": 0.2,
+      "hotness": 0.20840000000000003
     },
     {
       "id": "src_cli_index_ts",
       "path": "src/cli/index.ts",
       "name": "index.ts",
       "language": "TypeScript",
-      "loc": 83,
+      "loc": 82,
       "complexity": 1,
       "imports": [
         "commander",
@@ -78,8 +90,8 @@
         "./commands/serve.js"
       ],
       "exports": [],
-      "churn": 0,
-      "hotness": 0.030900000000000004
+      "churn": 0.4,
+      "hotness": 0.19060000000000005
     },
     {
       "id": "src_cli_commands_serve_ts",
@@ -92,16 +104,16 @@
         "./map.js"
       ],
       "exports": [],
-      "churn": 0,
-      "hotness": 0.0135
+      "churn": 0.2,
+      "hotness": 0.09350000000000001
     },
     {
       "id": "src_cli_commands_scan_ts",
       "path": "src/cli/commands/scan.ts",
       "name": "scan.ts",
       "language": "TypeScript",
-      "loc": 460,
-      "complexity": 96,
+      "loc": 468,
+      "complexity": 97,
       "imports": [
         "ts-morph",
         "simple-git",
@@ -113,16 +125,16 @@
         "url"
       ],
       "exports": [],
-      "churn": 0,
-      "hotness": 0.714
+      "churn": 0.6,
+      "hotness": 0.9623999999999999
     },
     {
       "id": "src_cli_commands_map_ts",
       "path": "src/cli/commands/map.ts",
       "name": "map.ts",
       "language": "TypeScript",
-      "loc": 534,
-      "complexity": 23,
+      "loc": 557,
+      "complexity": 24,
       "imports": [
         "./scan.js",
         "chalk",
@@ -134,8 +146,8 @@
         "open"
       ],
       "exports": [],
-      "churn": 0,
-      "hotness": 0.2982
+      "churn": 0.4,
+      "hotness": 0.4711
     }
   ],
   "edges": [
@@ -167,14 +179,14 @@
   ],
   "metadata": {
     "rootPath": "/data/data/com.termux/files/home/repomap",
-    "totalFiles": 9,
-    "totalLOC": 7346,
+    "totalFiles": 10,
+    "totalLOC": 7152,
     "languages": {
-      "JSON": 3,
-      "HTML": 1,
+      "JSON": 4,
+      "JavaScript": 1,
       "Markdown": 1,
       "TypeScript": 4
     },
-    "scanTime": 24661
+    "scanTime": 28951
   }
 }

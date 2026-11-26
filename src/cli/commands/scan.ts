@@ -154,19 +154,24 @@ async function getGitChurn(repoPath: string, filePaths: string[]): Promise<Recor
   const git = simpleGit(repoPath);
   
   try {
-    // Get commit count per file (last 100 commits for speed)
-    const log = await git.log(['--oneline', '-100', '--name-only', '--pretty=format:']);
+    // Use raw git output; simple-git's parser mis-handles --name-only
+    // with --pretty=format, so parse the raw text ourselves.
+    const raw = await git.raw(['log', '-100', '--name-only', '--pretty=format:%x00']);
     
     const fileCommitCount: Record<string, number> = {};
     
-    for (const commit of log.all) {
-      const commitAny = commit as any;
-      if (commitAny.files) {
-        for (const file of commitAny.files) {
-          const normalized = path.normalize(file);
-          fileCommitCount[normalized] = (fileCommitCount[normalized] || 0) + 1;
-        }
-      }
+    // Split on NUL: first block is the commit hashes, then filenames
+    // Actually simple-git joins commits; instead split per-commit by matching
+    // lines that look like paths (no leading whitespace, not empty, not a hash)
+    const lines = raw.split('\n');
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed === '\x00') continue;
+      // Skip the commit hash lines (40 hex chars, or short 7-8)
+      if (/^[0-9a-f]{7,40}$/.test(trimmed)) continue;
+      // A changed file path
+      const normalized = path.normalize(trimmed);
+      fileCommitCount[normalized] = (fileCommitCount[normalized] || 0) + 1;
     }
     
     // Normalize to 0-1 scale
