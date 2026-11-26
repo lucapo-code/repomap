@@ -220,11 +220,14 @@ export async function scanRepository(
     '**/.vscode/**',
     '**/*.log',
     '**/*.lock',
+    '**/repomap.html',
+    '**/repomap-*.html',
   ];
   
+  // Single glob pass instead of one per pattern (much faster on large repos)
   let files: string[] = [];
-  for (const pattern of patterns) {
-    const matches = await glob(pattern, { cwd: absoluteRoot, absolute: true, ignore });
+  {
+    const matches = await glob(patterns, { cwd: absoluteRoot, absolute: true, ignore, nodir: true });
     files.push(...matches);
   }
   
