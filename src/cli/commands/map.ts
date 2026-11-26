@@ -109,6 +109,9 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         <span id="hotnessValue">0</span>
       </div>
       <input type="search" id="search" placeholder="Search files...">
+      <div class="filter-group">
+        <label><input type="checkbox" id="clusterToggle" checked style="margin-right:6px;">Group by folder</label>
+      </div>
       <button class="btn primary" id="exportBtn">Export PNG</button>
       <button class="btn" id="sidebarToggle">Details</button>
     </div>
@@ -201,6 +204,36 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
       .force('x', d3.forceX(width / 2).strength(0.05))
       .force('y', d3.forceY(height / 2).strength(0.05));
     
+    // Directory clustering: nodes in the same directory attract each other, so
+    // folders become visually grouped blobs instead of one hairball.
+    // Built once from the full node set and updated on filter via setDirForces().
+    const dirCenters = new Map();
+    const CLUSTER_STRENGTH = 0.32;
+    let clusterEnabled = true;
+    
+    function setDirForces(visibleNodes) {
+      // Drop previous per-dir forces
+      for (const dir of [...dirCenters.keys()]) {
+        simulation.force('dirx-' + dir, null);
+        simulation.force('diry-' + dir, null);
+        dirCenters.delete(dir);
+      }
+      if (!clusterEnabled) return;
+      
+      // Spread a handful of visible directories around the canvas in a rough
+      // ring so clusters do not collapse onto one point.
+      const dirs = [...new Set(visibleNodes.map(n => n.dir || '.'))];
+      const R = Math.min(width, height) * 0.32;
+      dirs.forEach((dir, i) => {
+        const a = (i / dirs.length) * Math.PI * 2;
+        const cx = width / 2 + Math.cos(a) * R;
+        const cy = height / 2 + Math.sin(a) * R;
+        dirCenters.set(dir, { x: cx, y: cy });
+        simulation.force('dirx-' + dir, d3.forceX(cx).strength(d => (d.dir || '.') === dir ? CLUSTER_STRENGTH : 0));
+        simulation.force('diry-' + dir, d3.forceY(cy).strength(d => (d.dir || '.') === dir ? CLUSTER_STRENGTH : 0));
+      });
+    }
+    
     // Tooltip
     const tooltip = d3.select('body')
       .append('div')
@@ -279,6 +312,8 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
       // Update simulation
       simulation.nodes(visibleNodesArr);
       simulation.force('link').links(visibleLinks);
+      // Update directory clustering forces for the current visible set
+      setDirForces(visibleNodesArr);
       
       // Render links
       const link = g.selectAll('.link')
@@ -420,6 +455,10 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
     document.getElementById('langFilter').addEventListener('change', render);
     document.getElementById('hotnessFilter').addEventListener('input', render);
     document.getElementById('search').addEventListener('input', render);
+    document.getElementById('clusterToggle').addEventListener('change', (e) => {
+      clusterEnabled = e.target.checked;
+      render();
+    });
     
     document.getElementById('sidebarToggle').addEventListener('click', () => {
       document.getElementById('sidebar').classList.toggle('open');

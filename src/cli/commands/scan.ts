@@ -14,6 +14,8 @@ export interface FileNode {
   id: string;
   path: string;
   name: string;
+  /** Directory of the file relative to the repo root, '.' for top-level files */
+  dir: string;
   language: string;
   loc: number;
   complexity: number;
@@ -241,9 +243,12 @@ export async function scanRepository(
   
   spinner.text = `Found ${files.length} files. Analyzing...`;
   
-  // Create ts-morph project for AST analysis
+  // Create ts-morph project for AST analysis.
+  // Only point at tsconfig.json when it exists; parsing non-TS files works fine
+  // without one (ts-morph falls back to its own default compiler options).
+  const tsConfigPath = path.join(absoluteRoot, 'tsconfig.json');
   const project = new Project({
-    tsConfigFilePath: path.join(absoluteRoot, 'tsconfig.json'),
+    ...(await fileExists(tsConfigPath) ? { tsConfigFilePath: tsConfigPath } : {}),
     skipAddingFilesFromTsConfig: true,
     skipFileDependencyResolution: true,
   });
@@ -252,6 +257,16 @@ export async function scanRepository(
   const edges: DependencyEdge[] = [];
   const languages: Record<string, number> = {};
   let totalLOC = 0;
+  
+  // Helper: does this path exist as a file?
+  async function fileExists(p: string): Promise<boolean> {
+    try {
+      await fs.stat(p);
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
   // Pre-compute normalized relative paths for import resolution
   const pathMap = new Map<string, string>(); // normalized relative path -> id
@@ -398,11 +413,13 @@ export async function scanRepository(
       
       const relativePath = path.relative(absoluteRoot, filePath);
       const id = relativePath.replace(/[\\/]/g, '_').replace(/\./g, '_');
+      const dir = path.dirname(relativePath).split(path.sep).join('/');
       
       nodes.push({
         id,
         path: relativePath,
         name: path.basename(filePath),
+        dir: dir === '' ? '.' : dir,
         language,
         loc,
         complexity,
