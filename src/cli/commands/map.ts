@@ -238,13 +238,18 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
     function updateStats() {
       const visibleNodes = nodes.filter(n => n.visible);
       const stats = document.getElementById('repoStats');
-      stats.innerHTML = 
+      const visibleNodeIds = new Set(visibleNodes.map(n => n.id));
+      const langCount = Object.keys(GRAPH_DATA.metadata.languages || {}).length;
+      const depCount = links.filter(e => {
+        const s = typeof e.source === 'object' ? e.source.id : e.source;
+        const t = typeof e.target === 'object' ? e.target.id : e.target;
+        return visibleNodeIds.has(s) && visibleNodeIds.has(t);
+      }).length;
+      stats.innerHTML =
         '<div class="stat"><span class="stat-value">' + visibleNodes.length + '</span><span class="stat-label">Files</span></div>' +
         '<div class="stat"><span class="stat-value">' + d3.sum(visibleNodes, d => d.loc) + '</span><span class="stat-label">LOC</span></div>' +
-        '<div class="stat"><span class="stat-value">' + GRAPH_DATA.metadata.languages + '</span><span class="stat-label">Languages</span></div>' +
-        '<div class="stat"><span class="stat-value">' + GRAPH_DATA.edges.filter(e => 
-          nodes.find(n => n.id === e.source)?.visible && nodes.find(n => n.id === e.target)?.visible
-        ).length + '</span><span class="stat-label">Dependencies</span></div>';
+        '<div class="stat"><span class="stat-value">' + langCount + '</span><span class="stat-label">Languages</span></div>' +
+        '<div class="stat"><span class="stat-value">' + depCount + '</span><span class="stat-label">Dependencies</span></div>';
     }
     
     // Render graph
@@ -371,8 +376,24 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
       const sidebar = document.getElementById('sidebar');
       sidebar.classList.add('open');
       
-      const incoming = links.filter(l => (l.target.id || l.target) === node.id).map(l => l.source.name || l.source);
-      const outgoing = links.filter(l => (l.source.id || l.source) === node.id).map(l => l.target.name || l.target);
+      const nodeId = typeof l.source === 'object' ? l.source.id : l.source;
+      const inId = typeof l.target === 'object' ? l.target.id : l.target;
+      const nodeName = typeof l.source === 'object' ? l.source.name : (l.source || '').split('/').pop();
+      const inName = typeof l.target === 'object' ? l.target.name : (l.target || '').split('/').pop();
+      const incoming = links.filter(l => {
+        const t = typeof l.target === 'object' ? l.target.id : l.target;
+        return t === node.id;
+      }).map(l => {
+        const s = typeof l.source === 'object' ? l.source.name : (l.source || '').split('/').pop();
+        return s;
+      });
+      const outgoing = links.filter(l => {
+        const s = typeof l.source === 'object' ? l.source.id : l.source;
+        return s === node.id;
+      }).map(l => {
+        const t = typeof l.target === 'object' ? l.target.name : (l.target || '').split('/').pop();
+        return t;
+      });
       
       document.getElementById('fileInfo').innerHTML = 
         '<h4>' + node.name + '</h4>' +
@@ -512,8 +533,10 @@ async function serveMap(htmlPath: string, port: number) {
     
     server.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') {
-        console.log(chalk.yellow(`Port ${port} in use, trying ${port + 1}...`));
-        serveMap(htmlPath, port + 1).then(resolve).catch(reject);
+        const nextPort = port + 1;
+        if (nextPort >= 65536) { reject(new Error('No available port')); return; }
+        console.log(chalk.yellow(`Port ${port} in use, trying ${nextPort}...`));
+        serveMap(htmlPath, nextPort).then(resolve).catch(reject);
       } else {
         reject(err);
       }

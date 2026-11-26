@@ -1,0 +1,180 @@
+{
+  "nodes": [
+    {
+      "id": "tsconfig_json",
+      "path": "tsconfig.json",
+      "name": "tsconfig.json",
+      "language": "JSON",
+      "loc": 24,
+      "complexity": 1,
+      "imports": [],
+      "exports": [],
+      "churn": 0,
+      "hotness": 0.0132
+    },
+    {
+      "id": "repomap_html",
+      "path": "repomap.html",
+      "name": "repomap.html",
+      "language": "HTML",
+      "loc": 422,
+      "complexity": 5665,
+      "imports": [],
+      "exports": [],
+      "churn": 0,
+      "hotness": 1
+    },
+    {
+      "id": "package_json",
+      "path": "package.json",
+      "name": "package.json",
+      "language": "JSON",
+      "loc": 62,
+      "complexity": 1,
+      "imports": [],
+      "exports": [],
+      "churn": 0,
+      "hotness": 0.024599999999999997
+    },
+    {
+      "id": "package-lock_json",
+      "path": "package-lock.json",
+      "name": "package-lock.json",
+      "language": "JSON",
+      "loc": 5548,
+      "complexity": 1,
+      "imports": [],
+      "exports": [],
+      "churn": 0,
+      "hotness": 1
+    },
+    {
+      "id": "README_md",
+      "path": "README.md",
+      "name": "README.md",
+      "language": "Markdown",
+      "loc": 208,
+      "complexity": 11,
+      "imports": [],
+      "exports": [],
+      "churn": 0,
+      "hotness": 0.12840000000000001
+    },
+    {
+      "id": "src_cli_index_ts",
+      "path": "src/cli/index.ts",
+      "name": "index.ts",
+      "language": "TypeScript",
+      "loc": 83,
+      "complexity": 1,
+      "imports": [
+        "commander",
+        "chalk",
+        "fs/promises",
+        "path",
+        "url",
+        "./commands/scan.js",
+        "./commands/map.js",
+        "./commands/serve.js"
+      ],
+      "exports": [],
+      "churn": 0,
+      "hotness": 0.030900000000000004
+    },
+    {
+      "id": "src_cli_commands_serve_ts",
+      "path": "src/cli/commands/serve.ts",
+      "name": "serve.ts",
+      "language": "TypeScript",
+      "loc": 5,
+      "complexity": 2,
+      "imports": [
+        "./map.js"
+      ],
+      "exports": [],
+      "churn": 0,
+      "hotness": 0.0135
+    },
+    {
+      "id": "src_cli_commands_scan_ts",
+      "path": "src/cli/commands/scan.ts",
+      "name": "scan.ts",
+      "language": "TypeScript",
+      "loc": 460,
+      "complexity": 96,
+      "imports": [
+        "ts-morph",
+        "simple-git",
+        "glob",
+        "chalk",
+        "ora",
+        "fs/promises",
+        "path",
+        "url"
+      ],
+      "exports": [],
+      "churn": 0,
+      "hotness": 0.714
+    },
+    {
+      "id": "src_cli_commands_map_ts",
+      "path": "src/cli/commands/map.ts",
+      "name": "map.ts",
+      "language": "TypeScript",
+      "loc": 534,
+      "complexity": 23,
+      "imports": [
+        "./scan.js",
+        "chalk",
+        "ora",
+        "fs/promises",
+        "path",
+        "url",
+        "http",
+        "open"
+      ],
+      "exports": [],
+      "churn": 0,
+      "hotness": 0.2982
+    }
+  ],
+  "edges": [
+    {
+      "from": "src_cli_index_ts",
+      "to": "src_cli_commands_scan_ts",
+      "type": "import"
+    },
+    {
+      "from": "src_cli_index_ts",
+      "to": "src_cli_commands_map_ts",
+      "type": "import"
+    },
+    {
+      "from": "src_cli_index_ts",
+      "to": "src_cli_commands_serve_ts",
+      "type": "import"
+    },
+    {
+      "from": "src_cli_commands_serve_ts",
+      "to": "src_cli_commands_map_ts",
+      "type": "import"
+    },
+    {
+      "from": "src_cli_commands_map_ts",
+      "to": "src_cli_commands_scan_ts",
+      "type": "import"
+    }
+  ],
+  "metadata": {
+    "rootPath": "/data/data/com.termux/files/home/repomap",
+    "totalFiles": 9,
+    "totalLOC": 7346,
+    "languages": {
+      "JSON": 3,
+      "HTML": 1,
+      "Markdown": 1,
+      "TypeScript": 4
+    },
+    "scanTime": 24661
+  }
+}

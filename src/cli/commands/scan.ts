@@ -244,7 +244,60 @@ export async function scanRepository(
   const edges: DependencyEdge[] = [];
   const languages: Record<string, number> = {};
   let totalLOC = 0;
-  
+
+  // Pre-compute normalized relative paths for import resolution
+  const pathMap = new Map<string, string>(); // normalized relative path -> id
+  for (const filePath of files) {
+    const rel = path.relative(absoluteRoot, filePath).split(path.sep).join('/');
+    pathMap.set(rel, rel.replace(/[\\/]/g, '_').replace(/\./g, '_'));
+  }
+
+  /**
+   * Resolve an import specifier (from a given file) to a node path in this repo.
+   * Handles relative imports, extensionless, ESM `.js` -> `.ts` mapping, and index files.
+   * Returns null for bare package specifiers (node_modules) and anything unresolved.
+   */
+  function resolveImport(fromRelPath: string, spec: string): string | null {
+    if (!spec) return null;
+    let base: string | null = null;
+
+    if (spec.startsWith('./') || spec.startsWith('../') || spec.startsWith('/')) {
+      const fromDir = fromRelPath.includes('/') ? fromRelPath.slice(0, fromRelPath.lastIndexOf('/')) : '';
+      const joined = path.normalize(path.join(fromDir, spec)).split(path.sep).join('/');
+      base = joined;
+    } else {
+      // Bare specifier: only accept if it matches a repo path exactly (alias imports)
+      base = spec.startsWith('src/') || spec.startsWith('./') ? path.normalize(spec).split(path.sep).join('/') : null;
+      if (base === null) return null;
+    }
+
+    if (base === null) return null;
+
+    const ext = path.extname(base);
+    const candidates: string[] = [];
+    const stem = ext ? base.slice(0, base.length - ext.length) : base;
+
+    if (ext) candidates.push(base, stem);
+    else candidates.push(stem);
+
+    // ESM `.js` / `.mjs` / `.cjs` specifiers map to TS sources
+    if (['.js', '.mjs', '.cjs', '.jsx'].includes(ext)) {
+      candidates.push(stem + '.ts', stem + '.tsx', stem + '.d.ts', stem);
+    }
+
+    for (const e of ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.py', '.rs', '.go', '.java', '.c', '.cc', '.cpp', '.h', '.hpp', '.cs', '.rb', '.php', '.swift', '.kt', '.scala', '.dart', '.vue', '.svelte', '.css', '.scss', '.less', '.json', '.yaml', '.yml', '.toml', '.md', '.sh']) {
+      candidates.push(stem + e);
+    }
+    for (const idx of ['index.ts', 'index.tsx', 'index.js', 'index.jsx', 'index.json', '__init__.py', 'mod.rs', 'lib.rs']) {
+      candidates.push(stem + '/' + idx);
+    }
+
+    for (const c of candidates) {
+      if (pathMap.has(c)) return c;
+    }
+    return null;
+  }
+
   // Get git churn if requested
   const churnMap = options.git !== false ? await getGitChurn(absoluteRoot, files) : {};
   
@@ -351,9 +404,16 @@ export async function scanRepository(
         hotness,
       });
       
-      // Build edges (will resolve after all nodes exist)
+      // Build edges, resolving imports to actual repo files
+      const fromRel = path.relative(absoluteRoot, filePath).split(path.sep).join('/');
       for (const imp of imports) {
-        edges.push({ from: id, to: imp, type: 'import' });
+        const target = resolveImport(fromRel, imp);
+        if (target) {
+          const targetId = pathMap.get(target);
+          if (targetId && targetId !== id) {
+            edges.push({ from: id, to: targetId, type: imp.startsWith('.') || imp.startsWith('/') ? 'import' : 'require' });
+          }
+        }
       }
     } catch (err) {
       // Skip files that can't be parsed
@@ -361,32 +421,13 @@ export async function scanRepository(
     }
   }
   
-  // Resolve edges to actual node IDs
-  const nodeMap = new Map(nodes.map(n => [n.path, n.id]));
-  
   const resolvedEdges: DependencyEdge[] = [];
+  const seen = new Set<string>();
   for (const edge of edges) {
-    // Try to find the target file
-    let targetId: string | null = null;
-    
-    // Direct path match
-    if (nodeMap.has(edge.to)) {
-      targetId = nodeMap.get(edge.to)!;
-    } else {
-      // Try fuzzy match for relative imports
-      for (const [nodePath, nodeId] of nodeMap) {
-        if (nodePath.endsWith(edge.to) || 
-            nodePath === edge.to ||
-            nodePath.replace(/\.(ts|tsx|js|jsx|py|rs|go|java)$/, '') === edge.to) {
-          targetId = nodeId;
-          break;
-        }
-      }
-    }
-    
-    if (targetId && targetId !== edge.from) {
-      resolvedEdges.push({ from: edge.from, to: targetId, type: edge.type });
-    }
+    const key = edge.from + '\u0000' + edge.to;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    resolvedEdges.push(edge);
   }
   
   const scanTime = Date.now() - startTime;

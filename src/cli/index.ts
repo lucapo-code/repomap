@@ -18,6 +18,7 @@ program
   .name('repomap')
   .description('Visual interactive map of any code repository')
   .version(version)
+  .enablePositionalOptions() // subcommand option flags stay on the subcommand
   .addHelpText('after', `
 Examples:
   $ repomap                          # Scan current directory and open map
