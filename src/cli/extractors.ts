@@ -27,10 +27,18 @@ function extractPython(src: string): ExtractedDeps {
     // Skip comments and strings-ish lines
     if (line.startsWith('#')) continue;
 
-    // from X import ...  (X may be relative: from .foo import bar, from .. import baz)
-    let m = line.match(/^from\s+([.\w]+)\s+import\s+/);
+    // from X import Y, Z  (X may be relative: from .foo import bar, from .. import baz)
+    // Also handles: from . import local_helper (where X is just . or ..)
+    let m = line.match(/^from\s+([.\w]+)\s+import\s+([\w\s,]+)/);
     if (m) {
-      imports.push(m[1]!);
+      const module = m[1]!;
+      const names = m[2]!.split(',').map(s => s.trim().split(/\s+as\s+/)[0]!.trim());
+      // Keep the module path for resolution
+      imports.push(module);
+      // Also add module::name for specific file resolution
+      for (const name of names) {
+        if (name) imports.push(module + '::' + name);
+      }
       continue;
     }
     // import X, Y, Z

@@ -34,6 +34,7 @@ program
   .argument('[path]', 'Repository path', process.cwd())
   .option('-o, --output <file>', 'Output JSON file')
   .option('--no-git', 'Skip git churn analysis')
+  .option('--max-files <number>', 'Limit number of files analyzed (keeps highest-churn)', parseInt)
   .action(async (repoPath, options) => {
     await scanCommand(repoPath, options);
   });
@@ -45,6 +46,7 @@ program
   .option('-o, --output <file>', 'Output HTML file')
   .option('--serve', 'Start local server after generating')
   .option('--port <number>', 'Server port', '3456')
+  .option('--max-files <number>', 'Limit number of files analyzed (keeps highest-churn)', parseInt)
   .action(async (repoPath, options) => {
     await mapCommand(repoPath, options);
   });
@@ -66,13 +68,15 @@ program
   .option('-p, --port <number>', 'Server port', '3456')
   .option('--no-git', 'Skip git churn analysis')
   .option('--filter <globs>', 'File glob patterns (comma-separated)')
+  .option('--max-files <number>', 'Limit number of files analyzed (keeps highest-churn)', parseInt)
   .action(async (repoPath, opts) => {
     await mapCommand(repoPath, {
       output: opts.output,
       serve: opts.serve,
       port: parseInt(opts.port),
       git: opts.git,
-      filter: opts.filter?.split(',') ?? []
+      filter: opts.filter?.split(',') ?? [],
+      maxFiles: opts.maxFiles
     });
   });
 

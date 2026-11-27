@@ -7,6 +7,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { extractByLanguage } from '../extractors.js';
+import { findCircularDependencies } from '../cycles.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -35,6 +36,8 @@ export interface DependencyEdge {
 export interface RepoGraph {
   nodes: FileNode[];
   edges: DependencyEdge[];
+  /** Circular dependency cycles (list of node-id paths), computed after edges are resolved */
+  cycles: string[][];
   metadata: {
     rootPath: string;
     totalFiles: number;
@@ -152,52 +155,226 @@ function calculateComplexity(sourceFile: SourceFile): number {
   return complexity;
 }
 
+/**
+ * Git churn per file, normalized 0..1. Fault-tolerant by design:
+ * - no git binary, not a repo, shallow clone, bad perms, 20k+ commits -> zeros
+ * - `Math.max(...spread)` blows the stack on big repos, so fold manually
+ * - paths with unicode/spaces survive because we never split on whitespace
+ * Returns a map of ALL requested files (missing ones = 0) so callers never
+ * have to guard against undefined.
+ */
 async function getGitChurn(repoPath: string, filePaths: string[]): Promise<Record<string, number>> {
   const churn: Record<string, number> = {};
-  const git = simpleGit(repoPath);
-  
+  const zero = () => { for (const f of filePaths) churn[f] = 0; };
+
+  let raw: string;
   try {
-    // Use raw git output; simple-git's parser mis-handles --name-only
-    // with --pretty=format, so parse the raw text ourselves.
-    const raw = await git.raw(['log', '-100', '--name-only', '--pretty=format:%x00']);
-    
+    const git = simpleGit(repoPath);
+    raw = await git.raw(['log', '-100', '--name-only', '--pretty=format:%x00']);
+  } catch {
+    zero();
+    return churn;
+  }
+
+  try {
     const fileCommitCount: Record<string, number> = {};
-    
-    // Split on NUL: first block is the commit hashes, then filenames
-    // Actually simple-git joins commits; instead split per-commit by matching
-    // lines that look like paths (no leading whitespace, not empty, not a hash)
-    const lines = raw.split('\n');
-    for (const line of lines) {
+
+    // git may quote paths (core.quotePath) when they contain unicode; unquote.
+    const unquote = (s: string): string => {
+      if (s.length > 1 && s.startsWith('"') && s.endsWith('"')) {
+        try { return JSON.parse(s) as string; } catch { return s.slice(1, -1); }
+      }
+      return s;
+    };
+
+    for (const line of raw.split('\n')) {
       const trimmed = line.trim();
       if (!trimmed || trimmed === '\x00') continue;
-      // Skip the commit hash lines (40 hex chars, or short 7-8)
+      // Commit hash separator lines, skip them
       if (/^[0-9a-f]{7,40}$/.test(trimmed)) continue;
-      // A changed file path
-      const normalized = path.normalize(trimmed);
+      const normalized = path.normalize(unquote(trimmed)).split(path.sep).join('/');
       fileCommitCount[normalized] = (fileCommitCount[normalized] || 0) + 1;
     }
-    
-    // Normalize to 0-1 scale
-    const maxCommits = Math.max(...Object.values(fileCommitCount), 1);
-    
+
+    // Fold instead of spread: Math.max(...10000 values) overflows the stack
+    let maxCommits = 1;
+    for (const v of Object.values(fileCommitCount)) {
+      if (v > maxCommits) maxCommits = v;
+    }
+
     for (const filePath of filePaths) {
-      const relative = path.relative(repoPath, filePath);
-      const normalized = path.normalize(relative);
-      churn[filePath] = (fileCommitCount[normalized] || 0) / maxCommits;
+      const rel = path.relative(repoPath, filePath).split(path.sep).join('/');
+      churn[filePath] = (fileCommitCount[rel] || 0) / maxCommits;
     }
   } catch {
-    // Git not available or not a repo, return zeros
-    for (const filePath of filePaths) {
-      churn[filePath] = 0;
+    // Any parse surprise: fall back to zeros rather than failing the scan
+    zero();
+  }
+
+  return churn;
+}
+
+/**
+ * Resolve an import specifier (from a given file) to a node path in this repo.
+ * Handles relative imports, extensionless, ESM `.js` -> `.ts` mapping, and index files.
+ * Returns null for bare package specifiers (node_modules) and anything unresolved.
+ * `pathMap` maps normalized relative paths -> node id.
+ */
+export function resolveImport(
+  fromRelPath: string,
+  spec: string,
+  language: string,
+  pathMap: Map<string, string>
+): string | null {
+  if (!spec) return null;
+  let base: string | null = null;
+
+  // Language-specific import patterns
+  if (language === 'Python') {
+    // Python: from .foo import bar, from .. import baz, import foo.bar
+    // Also handles module::name format from extractor (e.g., .::local_helper)
+    if (spec.includes('::')) {
+      const [module, name] = spec.split('::');
+      // Relative imports start with dots
+      if (module.startsWith('.')) {
+        const fromDir = fromRelPath.includes('/') ? fromRelPath.slice(0, fromRelPath.lastIndexOf('/')) : '';
+        let dots = 0;
+        while (dots < module.length && module[dots] === '.') dots++;
+        const rest = module.slice(dots);
+        let baseDir = fromDir;
+        for (let i = 1; i < dots; i++) {
+          baseDir = baseDir.includes('/') ? baseDir.slice(0, baseDir.lastIndexOf('/')) : '';
+        }
+        base = path.normalize(path.join(baseDir, rest)).split(path.sep).join('/');
+      } else {
+        base = module.replace(/\./g, '/');
+      }
+      if (name) {
+        base = base ? base + '/' + name : name;
+      }
+    } else if (spec.startsWith('.')) {
+      // Relative import without :: (legacy)
+      const fromDir = fromRelPath.includes('/') ? fromRelPath.slice(0, fromRelPath.lastIndexOf('/')) : '';
+      let dots = 0;
+      while (dots < spec.length && spec[dots] === '.') dots++;
+      const rest = spec.slice(dots);
+      let baseDir = fromDir;
+      for (let i = 1; i < dots; i++) {
+        baseDir = baseDir.includes('/') ? baseDir.slice(0, baseDir.lastIndexOf('/')) : '';
+      }
+      base = path.normalize(path.join(baseDir, rest)).split(path.sep).join('/');
+    } else {
+      base = spec.replace(/\./g, '/');
+    }
+  } else if (language === 'Rust') {
+    // Rust: use crate::foo::bar, use super::foo, use self::foo
+    // crate:: maps to src/, super:: goes up, self:: stays
+    if (spec.startsWith('crate::')) {
+      base = 'src/' + spec.slice(7).replace(/::/g, '/');
+    } else if (spec.startsWith('self::')) {
+      const fromDir = fromRelPath.includes('/') ? fromRelPath.slice(0, fromRelPath.lastIndexOf('/')) : '';
+      base = path.normalize(path.join(fromDir, spec.slice(6).replace(/::/g, '/'))).split(path.sep).join('/');
+    } else if (spec.startsWith('super::')) {
+      const fromDir = fromRelPath.includes('/') ? fromRelPath.slice(0, fromRelPath.lastIndexOf('/')) : '';
+      let up = 0;
+      let s = spec;
+      while (s.startsWith('super::')) { up++; s = s.slice(7); }
+      let baseDir = fromDir;
+      for (let i = 0; i < up; i++) {
+        baseDir = baseDir.includes('/') ? baseDir.slice(0, baseDir.lastIndexOf('/')) : '';
+      }
+      base = path.normalize(path.join(baseDir, s.replace(/::/g, '/'))).split(path.sep).join('/');
+    } else {
+      // External crate like std:: or serde:: - skip
+      return null;
+    }
+  } else if (language === 'Go') {
+    // Go: imports are module paths like "github.com/user/repo/pkg" or local "internal/util"
+    // Only resolve if the path exists in the repo (local import)
+    // Skip if it looks like a domain (contains a dot in the first segment)
+    const firstSeg = spec.split('/')[0] ?? '';
+    if (firstSeg.includes('.')) return null;
+    base = spec;
+  } else {
+    // JS/TS and others: relative ./ ../ or bare
+    if (spec.startsWith('./') || spec.startsWith('../') || spec.startsWith('/')) {
+      const fromDir = fromRelPath.includes('/') ? fromRelPath.slice(0, fromRelPath.lastIndexOf('/')) : '';
+      const joined = path.normalize(path.join(fromDir, spec)).split(path.sep).join('/');
+      base = joined;
+    } else {
+      // Bare specifier: only accept if it matches a repo path exactly (alias imports)
+      base = spec.startsWith('src/') || spec.startsWith('./') ? path.normalize(spec).split(path.sep).join('/') : null;
+      if (base === null) return null;
     }
   }
-  
-  return churn;
+
+  if (base === null) return null;
+
+  // For Python absolute imports and Go local imports, try to match against
+  // known repo paths even if base doesn't directly match
+  const additionalCandidates: string[] = [];
+  if (language === 'Python' && !spec.startsWith('.')) {
+    // Python absolute import: try to find any file matching the import name
+    // e.g., 'utils' -> 'src/utils.py', 'pkg/utils.py', etc.
+    for (const [p] of pathMap) {
+      const stem = p.replace(/\.[^.]+$/, '');
+      if (stem === spec || stem.endsWith('/' + spec)) {
+        additionalCandidates.push(p);
+      }
+    }
+  } else if (language === 'Go') {
+    // Go local import: try to match as a path suffix
+    // e.g., 'pkg' -> 'pkg/pkg.go', 'internal/util' -> 'internal/util.go'
+    for (const [p] of pathMap) {
+      if (p === spec + '.go' || p.endsWith('/' + spec + '.go') || p === spec || p.endsWith('/' + spec)) {
+        additionalCandidates.push(p);
+      }
+    }
+  }
+
+  const ext = path.extname(base);
+  const candidates: string[] = [...additionalCandidates];
+  const stem = ext ? base.slice(0, base.length - ext.length) : base;
+
+  if (ext) candidates.push(base, stem);
+  else candidates.push(stem);
+
+  // ESM `.js` / `.mjs` / `.cjs` specifiers map to TS sources
+  if (['.js', '.mjs', '.cjs', '.jsx'].includes(ext)) {
+    candidates.push(stem + '.ts', stem + '.tsx', stem + '.d.ts', stem);
+  }
+
+  for (const e of ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.py', '.rs', '.go', '.java', '.c', '.cc', '.cpp', '.h', '.hpp', '.cs', '.rb', '.php', '.swift', '.kt', '.scala', '.dart', '.vue', '.svelte', '.css', '.scss', '.less', '.json', '.yaml', '.yml', '.toml', '.md', '.sh']) {
+    candidates.push(stem + e);
+  }
+  for (const idx of ['index.ts', 'index.tsx', 'index.js', 'index.jsx', 'index.json', '__init__.py', 'mod.rs', 'lib.rs']) {
+    candidates.push(stem + '/' + idx);
+  }
+
+  for (const c of candidates) {
+    if (pathMap.has(c)) return c;
+  }
+
+  // Rust/Go/Python-style: try progressively shorter path segments
+  // crate::utils::helper -> src/utils/helper -> src/utils -> src
+  // Python: foo.bar.baz -> foo/bar/baz -> foo/bar -> foo
+  const segments = stem.split('/');
+  for (let i = segments.length - 1; i > 0; i--) {
+    const prefix = segments.slice(0, i).join('/');
+    for (const e of ['.rs', '.py', '.go', '.ts', '.js', '.java', '.kt']) {
+      if (pathMap.has(prefix + e)) return prefix + e;
+    }
+    for (const idx of ['mod.rs', '__init__.py', 'index.ts', 'index.js']) {
+      if (pathMap.has(prefix + '/' + idx)) return prefix + '/' + idx;
+    }
+  }
+
+  return null;
 }
 
 export async function scanRepository(
   rootPath: string,
-  options: { filter?: string[]; git?: boolean } = {}
+  options: { filter?: string[]; git?: boolean; maxFiles?: number } = {}
 ): Promise<RepoGraph> {
   const startTime = Date.now();
   const spinner = ora('Scanning repository...').start();
@@ -276,122 +453,33 @@ export async function scanRepository(
     pathMap.set(rel, rel.replace(/[\\/]/g, '_').replace(/\./g, '_'));
   }
 
-  /**
-   * Resolve an import specifier (from a given file) to a node path in this repo.
-   * Handles relative imports, extensionless, ESM `.js` -> `.ts` mapping, and index files.
-   * Returns null for bare package specifiers (node_modules) and anything unresolved.
-   */
-  function resolveImport(fromRelPath: string, spec: string, language: string): string | null {
-    if (!spec) return null;
-    let base: string | null = null;
-
-    // Language-specific import patterns
-    if (language === 'Python') {
-      // Python: from .foo import bar, from .. import baz, import foo.bar
-      // Relative imports start with dots
-      if (spec.startsWith('.')) {
-        const fromDir = fromRelPath.includes('/') ? fromRelPath.slice(0, fromRelPath.lastIndexOf('/')) : '';
-        // Count leading dots
-        let dots = 0;
-        while (dots < spec.length && spec[dots] === '.') dots++;
-        const rest = spec.slice(dots);
-        
-        // Go up (dots - 1) directories from fromDir
-        let baseDir = fromDir;
-        for (let i = 1; i < dots; i++) {
-          baseDir = baseDir.includes('/') ? baseDir.slice(0, baseDir.lastIndexOf('/')) : '';
-        }
-        base = path.normalize(path.join(baseDir, rest)).split(path.sep).join('/');
-      } else {
-        // Absolute import within repo: convert dots to slashes
-        base = spec.replace(/\./g, '/');
-      }
-    } else if (language === 'Rust') {
-      // Rust: use crate::foo::bar, use super::foo, use self::foo
-      // crate:: maps to src/, super:: goes up, self:: stays
-      if (spec.startsWith('crate::')) {
-        base = 'src/' + spec.slice(7).replace(/::/g, '/');
-      } else if (spec.startsWith('self::')) {
-        const fromDir = fromRelPath.includes('/') ? fromRelPath.slice(0, fromRelPath.lastIndexOf('/')) : '';
-        base = path.normalize(path.join(fromDir, spec.slice(6).replace(/::/g, '/'))).split(path.sep).join('/');
-      } else if (spec.startsWith('super::')) {
-        const fromDir = fromRelPath.includes('/') ? fromRelPath.slice(0, fromRelPath.lastIndexOf('/')) : '';
-        let up = 0;
-        let s = spec;
-        while (s.startsWith('super::')) { up++; s = s.slice(7); }
-        let baseDir = fromDir;
-        for (let i = 0; i < up; i++) {
-          baseDir = baseDir.includes('/') ? baseDir.slice(0, baseDir.lastIndexOf('/')) : '';
-        }
-        base = path.normalize(path.join(baseDir, s.replace(/::/g, '/'))).split(path.sep).join('/');
-      } else {
-        // External crate like std:: or serde:: - skip
-        return null;
-      }
-    } else if (language === 'Go') {
-      // Go: imports are module paths like "github.com/user/repo/pkg" or local "internal/util"
-      // Only resolve if the path exists in the repo (local import)
-      // Skip if it looks like a domain (contains a dot in the first segment)
-      const firstSeg = spec.split('/')[0] ?? '';
-      if (firstSeg.includes('.')) return null;
-      base = spec;
-    } else {
-      // JS/TS and others: relative ./ ../ or bare
-      if (spec.startsWith('./') || spec.startsWith('../') || spec.startsWith('/')) {
-        const fromDir = fromRelPath.includes('/') ? fromRelPath.slice(0, fromRelPath.lastIndexOf('/')) : '';
-        const joined = path.normalize(path.join(fromDir, spec)).split(path.sep).join('/');
-        base = joined;
-      } else {
-        // Bare specifier: only accept if it matches a repo path exactly (alias imports)
-        base = spec.startsWith('src/') || spec.startsWith('./') ? path.normalize(spec).split(path.sep).join('/') : null;
-        if (base === null) return null;
-      }
-    }
-
-    if (base === null) return null;
-
-    const ext = path.extname(base);
-    const candidates: string[] = [];
-    const stem = ext ? base.slice(0, base.length - ext.length) : base;
-
-    if (ext) candidates.push(base, stem);
-    else candidates.push(stem);
-
-    // ESM `.js` / `.mjs` / `.cjs` specifiers map to TS sources
-    if (['.js', '.mjs', '.cjs', '.jsx'].includes(ext)) {
-      candidates.push(stem + '.ts', stem + '.tsx', stem + '.d.ts', stem);
-    }
-
-    for (const e of ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.py', '.rs', '.go', '.java', '.c', '.cc', '.cpp', '.h', '.hpp', '.cs', '.rb', '.php', '.swift', '.kt', '.scala', '.dart', '.vue', '.svelte', '.css', '.scss', '.less', '.json', '.yaml', '.yml', '.toml', '.md', '.sh']) {
-      candidates.push(stem + e);
-    }
-    for (const idx of ['index.ts', 'index.tsx', 'index.js', 'index.jsx', 'index.json', '__init__.py', 'mod.rs', 'lib.rs']) {
-      candidates.push(stem + '/' + idx);
-    }
-
-    for (const c of candidates) {
-      if (pathMap.has(c)) return c;
-    }
-
-    // Rust/Go/Python-style: try progressively shorter path segments
-    // crate::utils::helper -> src/utils/helper -> src/utils -> src
-    // Python: foo.bar.baz -> foo/bar/baz -> foo/bar -> foo
-    const segments = stem.split('/');
-    for (let i = segments.length - 1; i > 0; i--) {
-      const prefix = segments.slice(0, i).join('/');
-      for (const e of ['.rs', '.py', '.go', '.ts', '.js', '.java', '.kt']) {
-        if (pathMap.has(prefix + e)) return prefix + e;
-      }
-      for (const idx of ['mod.rs', '__init__.py', 'index.ts', 'index.js']) {
-        if (pathMap.has(prefix + '/' + idx)) return prefix + '/' + idx;
-      }
-    }
-
-    return null;
-  }
-
   // Get git churn if requested
   const churnMap = options.git !== false ? await getGitChurn(absoluteRoot, files) : {};
+  
+  // Apply --max-files limit: keep the most interesting files so a huge repo
+  // still produces a readable map instead of a hairball.
+  // Rank = git churn (0..1) + file size (0..1) + shallow-path bonus, so a repo
+  // without git history still keeps its biggest, most central files.
+  if (options.maxFiles && files.length > options.maxFiles) {
+    const before = files.length;
+
+    const sizes = await Promise.all(files.map(f => fs.stat(f).then(s => s.size, () => 0)));
+    const maxSize = sizes.reduce((m, s) => Math.max(m, s), 0) || 1;
+
+    const scored = files.map((f, i) => {
+      const churnScore = churnMap[f] || 0;
+      const sizeScore = (sizes[i] ?? 0) / maxSize;
+      // Shorter relative paths tend to be entry points / core files
+      const depthScore = Math.max(0, 1 - (path.relative(absoluteRoot, f).split(path.sep).length - 1) / 8);
+      return { f, score: churnScore * 0.5 + sizeScore * 0.4 + depthScore * 0.1 };
+    });
+
+    scored.sort((a, b) => b.score - a.score);
+    files = scored.slice(0, options.maxFiles).map(s => s.f);
+    spinner.warn(chalk.yellow(
+      `Truncated to ${options.maxFiles} of ${before} files (--max-files). Kept the highest-churn / largest files.`
+    ));
+  }
   
   // Helper: read file text and extract deps/complexity by language
   async function processFile(filePath: string, language: string): Promise<{ imports: string[]; exports: string[]; complexity: number; loc: number; text: string }> {
@@ -519,7 +607,7 @@ export async function scanRepository(
       // Build edges, resolving imports to actual repo files
       const fromRel = path.relative(absoluteRoot, filePath).split(path.sep).join('/');
       for (const imp of imports) {
-        const target = resolveImport(fromRel, imp, language);
+        const target = resolveImport(fromRel, imp, language, pathMap);
         if (target) {
           const targetId = pathMap.get(target);
           if (targetId && targetId !== id) {
@@ -541,13 +629,27 @@ export async function scanRepository(
     seen.add(key);
     resolvedEdges.push(edge);
   }
-  
+
+  // Detect circular dependencies via SCC (Tarjan)
+  const cycleInfo = findCircularDependencies(
+    nodes.map(n => n.id),
+    resolvedEdges
+  );
+  const cycles = cycleInfo.cycles.map(c => c.map(id => {
+    const node = nodes.find(n => n.id === id);
+    return node ? node.path : id;
+  }));
+  if (cycles.length > 0) {
+    spinner.warn(chalk.yellow(`Found ${cycles.length} circular dependency cycle${cycles.length > 1 ? 's' : ''}`));
+  }
+
   const scanTime = Date.now() - startTime;
   spinner.succeed(chalk.green(`Scanned ${nodes.length} files in ${scanTime}ms`));
   
   return {
     nodes,
     edges: resolvedEdges,
+    cycles,
     metadata: {
       rootPath: absoluteRoot,
       totalFiles: nodes.length,
@@ -558,8 +660,8 @@ export async function scanRepository(
   };
 }
 
-export async function scanCommand(repoPath: string, options: { output?: string; git?: boolean; filter?: string[] } = {}) {
-  const graph = await scanRepository(repoPath, { filter: options.filter, git: options.git });
+export async function scanCommand(repoPath: string, options: { output?: string; git?: boolean; filter?: string[]; maxFiles?: number } = {}) {
+  const graph = await scanRepository(repoPath, { filter: options.filter, git: options.git, maxFiles: options.maxFiles });
   
   if (options.output) {
     await fs.writeFile(options.output, JSON.stringify(graph, null, 2));
