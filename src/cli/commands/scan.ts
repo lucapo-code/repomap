@@ -6,6 +6,7 @@ import ora from 'ora';
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { extractByLanguage } from '../extractors.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -280,18 +281,71 @@ export async function scanRepository(
    * Handles relative imports, extensionless, ESM `.js` -> `.ts` mapping, and index files.
    * Returns null for bare package specifiers (node_modules) and anything unresolved.
    */
-  function resolveImport(fromRelPath: string, spec: string): string | null {
+  function resolveImport(fromRelPath: string, spec: string, language: string): string | null {
     if (!spec) return null;
     let base: string | null = null;
 
-    if (spec.startsWith('./') || spec.startsWith('../') || spec.startsWith('/')) {
-      const fromDir = fromRelPath.includes('/') ? fromRelPath.slice(0, fromRelPath.lastIndexOf('/')) : '';
-      const joined = path.normalize(path.join(fromDir, spec)).split(path.sep).join('/');
-      base = joined;
+    // Language-specific import patterns
+    if (language === 'Python') {
+      // Python: from .foo import bar, from .. import baz, import foo.bar
+      // Relative imports start with dots
+      if (spec.startsWith('.')) {
+        const fromDir = fromRelPath.includes('/') ? fromRelPath.slice(0, fromRelPath.lastIndexOf('/')) : '';
+        // Count leading dots
+        let dots = 0;
+        while (dots < spec.length && spec[dots] === '.') dots++;
+        const rest = spec.slice(dots);
+        
+        // Go up (dots - 1) directories from fromDir
+        let baseDir = fromDir;
+        for (let i = 1; i < dots; i++) {
+          baseDir = baseDir.includes('/') ? baseDir.slice(0, baseDir.lastIndexOf('/')) : '';
+        }
+        base = path.normalize(path.join(baseDir, rest)).split(path.sep).join('/');
+      } else {
+        // Absolute import within repo: convert dots to slashes
+        base = spec.replace(/\./g, '/');
+      }
+    } else if (language === 'Rust') {
+      // Rust: use crate::foo::bar, use super::foo, use self::foo
+      // crate:: maps to src/, super:: goes up, self:: stays
+      if (spec.startsWith('crate::')) {
+        base = 'src/' + spec.slice(7).replace(/::/g, '/');
+      } else if (spec.startsWith('self::')) {
+        const fromDir = fromRelPath.includes('/') ? fromRelPath.slice(0, fromRelPath.lastIndexOf('/')) : '';
+        base = path.normalize(path.join(fromDir, spec.slice(6).replace(/::/g, '/'))).split(path.sep).join('/');
+      } else if (spec.startsWith('super::')) {
+        const fromDir = fromRelPath.includes('/') ? fromRelPath.slice(0, fromRelPath.lastIndexOf('/')) : '';
+        let up = 0;
+        let s = spec;
+        while (s.startsWith('super::')) { up++; s = s.slice(7); }
+        let baseDir = fromDir;
+        for (let i = 0; i < up; i++) {
+          baseDir = baseDir.includes('/') ? baseDir.slice(0, baseDir.lastIndexOf('/')) : '';
+        }
+        base = path.normalize(path.join(baseDir, s.replace(/::/g, '/'))).split(path.sep).join('/');
+      } else {
+        // External crate like std:: or serde:: - skip
+        return null;
+      }
+    } else if (language === 'Go') {
+      // Go: imports are module paths like "github.com/user/repo/pkg" or local "internal/util"
+      // Only resolve if the path exists in the repo (local import)
+      // Skip if it looks like a domain (contains a dot in the first segment)
+      const firstSeg = spec.split('/')[0] ?? '';
+      if (firstSeg.includes('.')) return null;
+      base = spec;
     } else {
-      // Bare specifier: only accept if it matches a repo path exactly (alias imports)
-      base = spec.startsWith('src/') || spec.startsWith('./') ? path.normalize(spec).split(path.sep).join('/') : null;
-      if (base === null) return null;
+      // JS/TS and others: relative ./ ../ or bare
+      if (spec.startsWith('./') || spec.startsWith('../') || spec.startsWith('/')) {
+        const fromDir = fromRelPath.includes('/') ? fromRelPath.slice(0, fromRelPath.lastIndexOf('/')) : '';
+        const joined = path.normalize(path.join(fromDir, spec)).split(path.sep).join('/');
+        base = joined;
+      } else {
+        // Bare specifier: only accept if it matches a repo path exactly (alias imports)
+        base = spec.startsWith('src/') || spec.startsWith('./') ? path.normalize(spec).split(path.sep).join('/') : null;
+        if (base === null) return null;
+      }
     }
 
     if (base === null) return null;
@@ -318,21 +372,35 @@ export async function scanRepository(
     for (const c of candidates) {
       if (pathMap.has(c)) return c;
     }
+
+    // Rust/Go/Python-style: try progressively shorter path segments
+    // crate::utils::helper -> src/utils/helper -> src/utils -> src
+    // Python: foo.bar.baz -> foo/bar/baz -> foo/bar -> foo
+    const segments = stem.split('/');
+    for (let i = segments.length - 1; i > 0; i--) {
+      const prefix = segments.slice(0, i).join('/');
+      for (const e of ['.rs', '.py', '.go', '.ts', '.js', '.java', '.kt']) {
+        if (pathMap.has(prefix + e)) return prefix + e;
+      }
+      for (const idx of ['mod.rs', '__init__.py', 'index.ts', 'index.js']) {
+        if (pathMap.has(prefix + '/' + idx)) return prefix + '/' + idx;
+      }
+    }
+
     return null;
   }
 
   // Get git churn if requested
   const churnMap = options.git !== false ? await getGitChurn(absoluteRoot, files) : {};
   
-  for (const filePath of files) {
-    try {
-      const language = detectLanguage(filePath);
-      languages[language] = (languages[language] || 0) + 1;
-      
+  // Helper: read file text and extract deps/complexity by language
+  async function processFile(filePath: string, language: string): Promise<{ imports: string[]; exports: string[]; complexity: number; loc: number; text: string }> {
+    const text = await fs.readFile(filePath, 'utf-8');
+    const loc = text.split('\n').length;
+    
+    if (language === 'TypeScript' || language === 'JavaScript') {
+      // Use ts-morph for JS/TS (full AST)
       const sourceFile = project.addSourceFileAtPath(filePath);
-      const text = sourceFile.getFullText();
-      const loc = text.split('\n').length;
-      totalLOC += loc;
       
       // Extract imports
       const imports: string[] = [];
@@ -359,7 +427,6 @@ export async function scanRepository(
       
       // Dynamic imports
       try {
-        // Check if ImportExpression exists in this TS version
         const importExprKind = (SyntaxKind as any).ImportExpression;
         if (importExprKind) {
           const dynamicImports = sourceFile.getDescendantsOfKind(importExprKind);
@@ -385,7 +452,6 @@ export async function scanRepository(
         if (moduleSpec) {
           exports.push(moduleSpec);
         } else {
-          // Named exports
           const namedExports = exp.getNamedExports();
           for (const ne of namedExports) {
             exports.push(ne.getName());
@@ -393,19 +459,40 @@ export async function scanRepository(
         }
       }
       
-      // Default exports
       const defaultExports = sourceFile.getDefaultExportSymbol();
       if (defaultExports) {
         exports.push('default');
       }
       
-      // Export assignments
       const exportAssignments = sourceFile.getExportAssignments();
       for (const ea of exportAssignments) {
         exports.push('default');
       }
       
       const complexity = calculateComplexity(sourceFile);
+      
+      return { imports, exports, complexity, loc, text };
+    } else {
+      // Use regex extractors for all other languages
+      const extracted = extractByLanguage(language, text);
+      return { 
+        imports: extracted.imports, 
+        exports: extracted.exports, 
+        complexity: extracted.complexity, 
+        loc, 
+        text 
+      };
+    }
+  }
+  
+  for (const filePath of files) {
+    try {
+      const language = detectLanguage(filePath);
+      languages[language] = (languages[language] || 0) + 1;
+      
+      const { imports, exports, complexity, loc } = await processFile(filePath, language);
+      totalLOC += loc;
+      
       const churn = churnMap[filePath] || 0;
       
       // Hotness = combination of complexity, LOC, and churn
@@ -432,7 +519,7 @@ export async function scanRepository(
       // Build edges, resolving imports to actual repo files
       const fromRel = path.relative(absoluteRoot, filePath).split(path.sep).join('/');
       for (const imp of imports) {
-        const target = resolveImport(fromRel, imp);
+        const target = resolveImport(fromRel, imp, language);
         if (target) {
           const targetId = pathMap.get(target);
           if (targetId && targetId !== id) {

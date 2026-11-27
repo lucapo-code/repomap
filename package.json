@@ -6,6 +6,10 @@
   "bin": {
     "repomap": "./dist/cli/index.js"
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsx watch src/cli/index.ts",

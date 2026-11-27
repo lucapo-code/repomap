@@ -1,0 +1,46 @@
+name: repomap
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  map:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 100  # needed for git churn heatmap
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install repomap
+        run: npm install -g repomap
+
+      - name: Generate repo map
+        run: repomap map . -o repomap.html
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: repomap
+          path: repomap.html
+          retention-days: 30
+
+      # Optional: deploy to GitHub Pages on main branch
+      # - name: Deploy to Pages
+      #   if: github.ref == 'refs/heads/main'
+      #   uses: actions/configure-pages@v5
+      # - uses: actions/upload-pages-artifact@v3
+      #   if: github.ref == 'refs/heads/main'
+      #   with:
+      #     path: repomap.html
+      # - uses: actions/deploy-pages@v4
+      #   if: github.ref == 'refs/heads/main'

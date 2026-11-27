@@ -23,8 +23,8 @@ npx repomap --output map.html  # Export standalone HTML
 
 | Feature | Description |
 |---------|-------------|
-| **Multi-language** | TS/JS, Python, Rust, Go, Java, C++, C#, PHP, Ruby, Swift, Kotlin, and 40+ more |
-| **AST-based analysis** | Accurate imports/exports via `ts-morph` (not regex) |
+| **Multi-language** | TS/JS (AST via ts-morph), Python, Rust, Go, Java, C/C++, C#, PHP, Ruby, Swift, Kotlin, Shell + 40 more via regex extractors |
+| **AST + regex analysis** | Accurate imports/exports via `ts-morph` for JS/TS, regex extractors for 11+ other languages |
 | **Git churn heatmap** | Files colored by commit frequency (last 100 commits) |
 | **Complexity scoring** | Cyclomatic complexity per file |
 | **Hotness metric** | Combined score: complexity + LOC + churn |
@@ -137,11 +137,13 @@ jobs:
 ## How It Works
 
 1. **Glob discovery** — Finds all code files (respects `.gitignore` patterns)
-2. **AST parsing** — `ts-morph` parses each file for accurate imports/exports
-3. **Git analysis** — `simple-git` counts commits per file (last 100)
-4. **Graph construction** — Nodes + edges, resolves relative imports
-5. **D3 force layout** — Physics-based positioning, clusters by directory
-6. **HTML injection** — Embeds graph data in standalone HTML template
+2. **Language detection** — Maps file extensions to languages
+3. **Import extraction** — `ts-morph` AST for JS/TS, regex-based extractors for Python/Rust/Go/Java/C/C++/Ruby/PHP/C#/Swift/Kotlin/Shell
+4. **Import resolution** — Language-aware: Python relative dots, Rust `crate::`/`super::`, Go module paths, JS relative paths
+5. **Git analysis** — `simple-git` counts commits per file (last 100)
+6. **Graph construction** — Nodes + edges with progressive path resolution
+7. **D3 force layout** — Physics-based positioning, clusters by directory
+8. **HTML injection** — Embeds graph data in standalone HTML template
 
 ## Architecture
 
@@ -150,8 +152,9 @@ repomap/
 ├── src/
 │   ├── cli/
 │   │   ├── index.ts           # Commander CLI entry
+│   │   ├── extractors.ts      # Multi-language regex import/complexity extractors
 │   │   └── commands/
-│   │       ├── scan.ts        # Repository scanning + AST analysis
+│   │       ├── scan.ts        # Repository scanning + import resolution
 │   │       ├── map.ts         # HTML generation + D3 template
 │   │       └── serve.ts       # Local dev server
 │   └── types.ts               # Shared interfaces
